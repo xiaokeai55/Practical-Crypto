@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -42,6 +43,52 @@ func keylen(text string) int {
 	return result
 }
 
+func analyze(text string, keylen int) string {
+	key := ""
+
+	for i := 0; i < keylen; i++ {
+		split := ""
+		for j := i; j < len(text); j += keylen {
+			split += string(text[j])
+		}
+		key += decryptLetter(split)
+	}
+
+	return key
+}
+
+func decryptLetter(split string) string {
+	for i := 0; i < 26; i++ {
+		new := ""
+		for _, j := range split {
+			new += string((int(j)+i-65)%26 + 65)
+		}
+		if checkFreq(new) {
+			return string(26 - i + 65)
+		}
+	}
+	return "@"
+}
+
+func checkFreq(split string) bool {
+	f := make([]int, 26)
+	for _, i := range split {
+		f[int(i)-65]++
+	}
+	max := 0
+	letter := ""
+	for i := 0; i < 26; i++ {
+		if f[i] > max {
+			max = f[i]
+			letter = string(i + 65)
+		}
+	}
+	if letter == "E" {
+		return true
+	}
+	return false
+}
+
 // Main function
 func main() {
 	op := os.Args[1]
@@ -55,8 +102,13 @@ func main() {
 	data = strings.ToUpper(regexp.MustCompile("[^a-zA-Z]+").ReplaceAllString(data, ""))
 
 	switch op {
-	case "vigenere-":
-
+	case "vigenere-cryptanalyze":
+		keylength, err := strconv.Atoi(os.Args[3])
+		if err != nil {
+			fmt.Println("Keylength should be int type")
+		}
+		key := analyze(data, keylength)
+		fmt.Printf("The most possible key is %s\n", key)
 	case "vigenere-keylength":
 		k := keylen(data)
 		fmt.Printf("The most possible key length is %d\n", k)

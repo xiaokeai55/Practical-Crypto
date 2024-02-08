@@ -1,0 +1,7 @@
+{
+    "work_dir": ".",
+    "encrypt": "Problem 1.go",
+    "decrypt": "Problem 1.go",
+    "keylength": "Problem 2&3.go",
+    "cryptanalyze": "Problem 2&3.go"
+  }

@@ -415,7 +415,7 @@ func sendAttachmentToServer(recipient string, message string, url string) error 
 	encryptedMessage := encryptMessage([]byte(message), username, pubkey)
 
 	// Format the message as a JSON object and increment the message ID counter
-	msg := MessageStruct{username, recipient, messageIDCounter, 0, b64.StdEncoding.EncodeToString(encryptedMessage), "", url, ""}
+	msg := MessageStruct{username, recipient, messageIDCounter, 0, b64.StdEncoding.EncodeToString(encryptedMessage), "", "", ""}
 	messageIDCounter++
 
 	body, err := json.Marshal(msg)
@@ -522,7 +522,7 @@ func encryptAttachment(plaintextFilePath string, ciphertextFilePath string) (str
 	// 2. Next it encrypts the file using ChaCha20 under key `KEY` with a zero IV.
 	file, err := os.ReadFile(plaintextFilePath)
 	if err != nil {
-		panic(err)
+		return "", "", errors.New("file does not exist")
 	}
 
 	nonce := make([]byte, 12)
@@ -829,21 +829,20 @@ func downloadAttachments(messageArray []MessageStruct) {
 
 	// Iterate through the array, checking for attachments
 	for i := 0; i < len(messageArray); i++ {
-		fmt.Printf("222222222222, url: %s", messageArray[i].url)
-		if messageArray[i].url != "" {
+		parts := strings.Split(messageArray[i].decrypted, "?")
+		if len(parts[0]) > 8 && parts[0][:9] == ">>>MSGURL" {
 			// Make a random filename
 			randBytes := make([]byte, 16)
 			rand.Read(randBytes)
 			localPath := filepath.Join(attachmentsDir, "attachment_"+hex.EncodeToString(randBytes)+".dat")
 
-			parts := strings.Split(messageArray[i].decrypted, "?")
+			url := strings.TrimPrefix(parts[0], ">>>MSGURL=")
 			key := strings.TrimPrefix(parts[1], "KEY=")
 			hash := strings.TrimPrefix(parts[2], "H=")
 
-			fmt.Printf("11111111111111")
 			// Decrypt attachment
 			// Downloads and decrypts an attachment from a given URL using the specified key and verifies the hash.
-			err := downloadFileFromServer(messageArray[i].url, localPath, key, hash)
+			err := downloadFileFromServer(url, localPath, key, hash)
 			if err == nil {
 				messageArray[i].localPath = localPath
 				fmt.Printf("Attachment from %s downloaded successfully to %s\n", messageArray[i].From, localPath)

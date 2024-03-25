@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	b64 "encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -206,7 +205,8 @@ func uploadFileToServer(filename string) (string, error) {
 }
 
 // Download a file from the server and return its local path
-func downloadFileFromServer(geturl string, localPath string) error {
+func downloadFileFromServer(geturl string, localPath string, key string, hash string) error {
+	//1. Downloads the file from the given URL.
 	// Get the file data
 	resp, err := http.Get(geturl)
 	if err != nil {
@@ -216,8 +216,32 @@ func downloadFileFromServer(geturl string, localPath string) error {
 
 	// no errors; return
 	if resp.StatusCode != 200 {
-		return errors.New("Bad result code")
+		return errors.New("bad result code")
 	}
+
+	encryptedData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	// 	2. Computes `HASH = SHA256(encrypted file)` and verifies that this matches the hash `H` specified in the message. If not, it rejects the attachment.
+	computedHash := sha256.Sum256(encryptedData)
+	if hex.EncodeToString(computedHash[:]) != hash {
+		return errors.New("hash mismatch")
+	}
+
+	// 3. Decrypts the message using the key `KEY` using ChaCha20 with IV=0.
+	decodedkey, err := b64.StdEncoding.DecodeString(key)
+	if err != nil {
+		panic(err)
+	}
+
+	cipher, err := chacha20.NewUnauthenticatedCipher(decodedkey, make([]byte, 12)) // 12-byte zero IV
+	if err != nil {
+		panic(err)
+	}
+	decryptedData := make([]byte, len(encryptedData))
+	cipher.XORKeyStream(decryptedData, encryptedData)
 
 	// Create the file
 	out, err := os.Create(localPath)
@@ -227,6 +251,9 @@ func downloadFileFromServer(geturl string, localPath string) error {
 	defer out.Close()
 
 	// Write the body to file
+	if err := os.WriteFile(localPath, decryptedData, 0644); err != nil {
+		return fmt.Errorf("failed to write decrypted file: %v", err)
+	}
 	_, err = io.Copy(out, resp.Body)
 	return err
 }
@@ -241,7 +268,7 @@ func serverLogin(username string, password string) (string, error) {
 		return "", err
 	}
 	if code != 200 {
-		return "", errors.New("Bad result code")
+		return "", errors.New("bad result code")
 	}
 
 	// Parse JSON into an APIKey struct
@@ -262,7 +289,7 @@ func getPublicKeyFromServer(forUser string) (*PubKeyStruct, error) {
 		return nil, err
 	}
 	if code != 200 {
-		return nil, errors.New("Bad result code")
+		return nil, errors.New("bad result code")
 	}
 
 	// Parse JSON into an PubKeyStruct
@@ -285,7 +312,7 @@ func registerUserWithServer(username string, password string) error {
 	}
 
 	if code != 200 {
-		return errors.New("Bad result code")
+		return errors.New("bad result code")
 	}
 
 	return nil
@@ -303,7 +330,7 @@ func getMessagesFromServer() ([]MessageStruct, error) {
 	}
 
 	if code != 200 {
-		return nil, errors.New("Bad result code")
+		return nil, errors.New("bad result code")
 	}
 
 	// Parse JSON into an array of MessageStructs
@@ -329,7 +356,7 @@ func getUserListFromServer() ([]UserStruct, error) {
 	}
 
 	if code != 200 {
-		return nil, errors.New("Bad result code")
+		return nil, errors.New("bad result code")
 	}
 
 	// Parse JSON into an array of MessageStructs
@@ -367,7 +394,43 @@ func sendMessageToServer(sender string, recipient string, message []byte, readRe
 	}
 
 	if code != 200 {
-		return errors.New("Bad result code")
+		return errors.New("bad result code")
+	}
+
+	return nil
+}
+
+// Post a message to the server
+func sendAttachmentToServer(recipient string, message string, url string) error {
+	posturl := serverProtocol + "://" + serverDomainAndPort + "/sendMessage/" +
+		username + "/" + apiKey
+
+	// First, obtain the recipient's public key
+	pubkey, err := getPublicKeyFromServer(recipient)
+	if err != nil {
+		fmt.Printf("Could not obtain public key for user %s.\n", recipient)
+		return err
+	}
+
+	encryptedMessage := encryptMessage([]byte(message), username, pubkey)
+
+	// Format the message as a JSON object and increment the message ID counter
+	msg := MessageStruct{username, recipient, messageIDCounter, 0, b64.StdEncoding.EncodeToString(encryptedMessage), "", url, ""}
+	messageIDCounter++
+
+	body, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+
+	// Post it to the server
+	code, _, err := doPostRequest(posturl, body)
+	if err != nil {
+		return err
+	}
+
+	if code != 200 {
+		return errors.New("bad result code")
 	}
 
 	return nil
@@ -449,7 +512,44 @@ func registerPublicKeyWithServer(username string, pubKeyEncoded PubKeyStruct) er
 // and file hash, or an error.
 func encryptAttachment(plaintextFilePath string, ciphertextFilePath string) (string, string, error) {
 	// TODO: IMPLEMENT
-	return "", "", nil
+
+	// 1. First, it selects a random 256-bit ChaCha20 key `KEY`.
+	KEY := make([]byte, 32)
+	if _, err := rand.Read(KEY); err != nil {
+		panic(err)
+	}
+
+	// 2. Next it encrypts the file using ChaCha20 under key `KEY` with a zero IV.
+	file, err := os.ReadFile(plaintextFilePath)
+	if err != nil {
+		panic(err)
+	}
+
+	nonce := make([]byte, 12)
+	cipher, err := chacha20.NewUnauthenticatedCipher(KEY, nonce)
+	if err != nil {
+		panic(err)
+	}
+	ciphertext := make([]byte, len(file))
+	cipher.XORKeyStream(ciphertext, file)
+
+	// 3. It computes `H = SHA256(encrypted file)`.
+	H := sha256.Sum256(ciphertext)
+
+	// 4. It uploads the encrypted file to the JMessage server, and obtains a temporary URL.
+	if err := os.WriteFile(ciphertextFilePath, ciphertext, 0644); err != nil {
+		panic(err)
+	}
+
+	url, err := uploadFileToServer(ciphertextFilePath)
+	if err != nil {
+		panic(err)
+	}
+
+	// 5. It sends a standard encrypted message containing `url, KEY, H` in the following structured plaintext:
+	encrypted := fmt.Sprintf(">>>MSGURL=%s?KEY=%s?H=%s", url, b64.StdEncoding.EncodeToString(KEY), hex.EncodeToString(H[:]))
+
+	return encrypted, url, nil
 }
 
 func decodePrivateSigningKey(privKey PrivKeyStruct) *ecdsa.PrivateKey {
@@ -457,16 +557,17 @@ func decodePrivateSigningKey(privKey PrivKeyStruct) *ecdsa.PrivateKey {
 
 	// TODO: IMPLEMENT
 
-	sigSK, err := base64.StdEncoding.DecodeString(privKey.SigSK)
-	if err != nil {
-		log.Fatalf("Failed to decode base64 private key: %v", err)
-	}
-
-	result, err = x509.ParseECPrivateKey(sigSK)
+	sigSK, err := b64.StdEncoding.DecodeString(privKey.SigSK)
 	if err != nil {
 		panic(err)
 	}
 
+	prik, err := x509.ParsePKCS8PrivateKey(sigSK)
+	if err != nil {
+		panic(err)
+	}
+
+	result = prik.(*ecdsa.PrivateKey)
 	return result
 }
 
@@ -489,7 +590,115 @@ func ECDSASign(message []byte, privKey PrivKeyStruct) []byte {
 func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyStruct, recipientPrivKey *PrivKeyStruct) ([]byte, error) {
 	// TODO: IMPLEMENT
 
-	return nil, nil
+	//Verify the signature `Sig`:
+
+	// 1. The recipient concatenates `C1` and `C2` to form a string `toVerify`.
+	var ciphertext CiphertextStruct
+
+	decodedPayload, err := b64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		panic(err)
+	}
+
+	err = json.Unmarshal([]byte(decodedPayload), &ciphertext)
+	if err != nil {
+		panic(err)
+	}
+
+	toVerify := ciphertext.C1 + ciphertext.C2
+	sig, err := b64.StdEncoding.DecodeString(ciphertext.Sig)
+	if err != nil {
+		panic(err)
+	}
+
+	// 2. The recipient decodes `sigPK` into an ECDSA public key (point on P-256).
+	DecodedSigPK, err := b64.StdEncoding.DecodeString(senderPubKey.SigPK)
+	if err != nil {
+		panic(err)
+	}
+	sigPK, err := x509.ParsePKIXPublicKey(DecodedSigPK)
+	if err != nil {
+		panic(err)
+	}
+
+	// 3. The recipient verifies the signature `Sig` against message `toVerify` using ECDSA with P-256 under key `sigPK`.
+	hash := sha256.Sum256([]byte(toVerify))
+
+	// 4. If the previous check fails, terminate processing and reject.
+	if !ecdsa.VerifyASN1(sigPK.(*ecdsa.PublicKey), hash[:], sig) {
+		return nil, errors.New("failed to verify \"Sig\"")
+	}
+
+	// Decrypt `C1` to obtain `K`:
+
+	// 1. The recipient BASE64-decodes `C1` as a point on P-256.
+	c1, err := b64.StdEncoding.DecodeString(ciphertext.C1)
+	if err != nil {
+		panic(err)
+	}
+
+	parsed, err := x509.ParsePKIXPublicKey(c1)
+	if err != nil {
+		panic(err)
+	}
+
+	C1decoded, err := parsed.(*ecdsa.PublicKey).ECDH()
+	if err != nil {
+		panic(err)
+	}
+
+	// 2. The recipient decodes `encSK` as a scalar `s` between `0` and `q-1` (inclusive).
+	encSK, err := b64.StdEncoding.DecodeString(recipientPrivKey.EncSK)
+	if err != nil {
+		panic(err)
+	}
+
+	privK, err := x509.ParsePKCS8PrivateKey(encSK)
+	if err != nil {
+		panic(err)
+	}
+
+	s, _ := privK.(*ecdsa.PrivateKey).ECDH()
+
+	// 3. The recipient computes `K = SHA256(s * C1)` where * represents scalar point multiplication.
+	ssk, _ := s.ECDH(C1decoded)
+	K := sha256.Sum256(ssk)
+
+	// Decrypt `C2` to obtain the plaintext:
+
+	// 1. The recipient BASE46-decodes `C2` as an octet string.
+	c2, err := b64.StdEncoding.DecodeString(ciphertext.C2)
+	if err != nil {
+		panic(err)
+	}
+
+	// 2. The recipient deciphers `C2` using ChaCha20 under `K`, using a zero IV to obtain `M'`.
+	M, err := chacha20.NewUnauthenticatedCipher(K[:], make([]byte, 12))
+	if err != nil {
+		panic(err)
+	}
+	plaintext := make([]byte, len(c2))
+	M.XORKeyStream(plaintext, c2)
+
+	// 3. The recipient parses `M'` as `username || 0x3A || M || CHECK`, where CHECK is a 4-byte octet string.
+	Mprime := plaintext[:len(plaintext)-8]
+
+	// 4. The recipient computes `CHECK' = CRC32(username || 0x3A || M )`. If `CHECK != CHECK'`, abort decryption and reject.
+	table := crc32.MakeTable(crc32.IEEE)
+	check := crc32.Checksum(Mprime, table)
+	if fmt.Sprintf("%08x", check) != string(plaintext[len(plaintext)-8:]) {
+		return nil, errors.New("CHECK != CHECK'")
+	}
+
+	// 5. If `username != sender_username`, then abort decryption and reject.
+	parts := strings.SplitN(string(Mprime), ":", 2)
+	if parts[0] != senderUsername {
+		return nil, errors.New("username != sender_username")
+	}
+
+	// 6. Otherwise, output `M`.
+
+	return []byte(parts[1]), nil
 }
 
 // Encrypts a byte string under a (Base64-encoded) public string, and returns a
@@ -499,12 +708,18 @@ func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct)
 
 	// Compute `C1` and `K`:
 	// The sender decodes `encPK` as a point on the P-256 elliptic curve.
+
 	decodeP, err := b64.StdEncoding.DecodeString(pubkey.EncPK)
 	if err != nil {
 		panic(err)
 	}
 
-	encPK, err := x509.ParsePKIXPublicKey(decodeP)
+	parsed, err := x509.ParsePKIXPublicKey(decodeP)
+	if err != nil {
+		panic(err)
+	}
+
+	encPK, err := parsed.(*ecdsa.PublicKey).ECDH()
 	if err != nil {
 		panic(err)
 	}
@@ -522,18 +737,14 @@ func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct)
 	}
 
 	// The sender computes `ssk = c*encPK` where * represents scalar point multiplication, and encodes the x-coordinate according to SEC 1, Version 2.0, Section 2.3.5.
-	ssk, _ := c.ECDH(encPK.(*ecdh.PublicKey))
+	ssk, _ := c.ECDH(encPK)
 
 	// // Version 2.0, Section 2.3.5.
 	// 5. The sender computes `K = SHA256(ssk)` where * represents scalar point multiplication. This key `K` will be used in the next section.
 	K := sha256.Sum256(ssk)
 
 	// 6. The sender encodes `epk` into the value `C1`, by first encoding it using [RFC 5208, Section 4.1] and then BASE64-encoding the result.
-	epkEncode, err := x509.MarshalPKIXPublicKey(epk)
-	if err != nil {
-		panic(err)
-	}
-	C1 := b64.StdEncoding.EncodeToString(epkEncode)
+	C1 := b64.StdEncoding.EncodeToString(epk)
 
 	// 	Compute `C2`:
 
@@ -551,13 +762,13 @@ func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct)
 	nonce := make([]byte, 12)
 	cipher, err := chacha20.NewUnauthenticatedCipher(K[:], nonce)
 	if err != nil {
-		log.Fatalf("Failed to create ChaCha20 cipher: %v", err)
+		panic(err)
 	}
 	ciphertext := make([]byte, len(Mp))
 	cipher.XORKeyStream(ciphertext, []byte(Mp))
 
 	// Encode the result using BASE64 to produce C2
-	C2 := base64.StdEncoding.EncodeToString(ciphertext)
+	C2 := b64.StdEncoding.EncodeToString(ciphertext)
 
 	// Compute `Sig`:
 
@@ -568,8 +779,7 @@ func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct)
 	// 3. The sender signs the string `toSign` using ECDSA with P-256 under key `sigSK`, and encodes the resulting signature using BASE64 to produce `Sig`.
 	result := ECDSASign([]byte(toSign), globalPrivKey)
 
-	Sig := base64.StdEncoding.EncodeToString(result)
-	fmt.Printf("Encrypted message: %s\n", Sig)
+	Sig := b64.StdEncoding.EncodeToString(result)
 
 	payload := map[string]string{
 		"C1":  C1,
@@ -588,6 +798,25 @@ func encryptMessage(message []byte, senderUsername string, pubkey *PubKeyStruct)
 // Decrypt a list of messages in place
 func decryptMessages(messageArray []MessageStruct) {
 	// TODO: IMPLEMENT
+	for i := range messageArray {
+		if messageArray[i].Payload != "" {
+			senderPubKey, err := getPublicKeyFromServer(messageArray[i].From)
+			if err != nil {
+				log.Printf("Failed to get public key for user %s: %v\n", messageArray[i].From, err)
+				continue
+			}
+
+			decryptedMessage, err := decryptMessage(messageArray[i].Payload, messageArray[i].From, senderPubKey, &globalPrivKey)
+			if err != nil {
+				log.Printf("Failed to decrypt message from %s: %v\n", messageArray[i].From, err)
+				continue
+			}
+
+			messageArray[i].decrypted = string(decryptedMessage)
+			//send receipts
+			sendMessageToServer(username, messageArray[i].From, nil, 1)
+		}
+	}
 }
 
 // Download any attachments in a message list
@@ -600,18 +829,28 @@ func downloadAttachments(messageArray []MessageStruct) {
 
 	// Iterate through the array, checking for attachments
 	for i := 0; i < len(messageArray); i++ {
+		fmt.Printf("222222222222, url: %s", messageArray[i].url)
 		if messageArray[i].url != "" {
 			// Make a random filename
 			randBytes := make([]byte, 16)
 			rand.Read(randBytes)
 			localPath := filepath.Join(attachmentsDir, "attachment_"+hex.EncodeToString(randBytes)+".dat")
 
-			err := downloadFileFromServer(messageArray[i].url, localPath)
+			parts := strings.Split(messageArray[i].decrypted, "?")
+			key := strings.TrimPrefix(parts[1], "KEY=")
+			hash := strings.TrimPrefix(parts[2], "H=")
+
+			fmt.Printf("11111111111111")
+			// Decrypt attachment
+			// Downloads and decrypts an attachment from a given URL using the specified key and verifies the hash.
+			err := downloadFileFromServer(messageArray[i].url, localPath, key, hash)
 			if err == nil {
 				messageArray[i].localPath = localPath
+				fmt.Printf("Attachment from %s downloaded successfully to %s\n", messageArray[i].From, localPath)
 			} else {
 				fmt.Println(err)
 			}
+
 		}
 	}
 }
@@ -701,7 +940,6 @@ func generatePublicKey() (PubKeyStruct, PrivKeyStruct, error) {
 
 	privKey.EncSK = b64.StdEncoding.EncodeToString(encSK)
 	pubKey.EncPK = b64.StdEncoding.EncodeToString(encPK)
-	fmt.Printf(privKey.EncSK)
 
 	// Generate a random scalar `b` between `0` and `q-1` (inclusive).
 	b, err := ecdh.P256().GenerateKey(rand.Reader)
@@ -779,7 +1017,7 @@ func main() {
 	apiKey = newAPIkey
 
 	// Generate a fresh public key, then upload it to the server
-	globalPubKey, globalPrivKey, err := generatePublicKey()
+	globalPubKey, globalPrivKey, err = generatePublicKey()
 	_ = globalPrivKey // This suppresses a Golang "unused variable" error
 	if err != nil {
 		fmt.Println("Unable to generate public key, exiting.")
@@ -847,8 +1085,26 @@ func main() {
 			if len(parts) < 3 {
 				fmt.Println("Correct usage: attach <username> <filename>")
 			} else {
-				fmt.Println("NOT IMPLEMENTED YET")
 				// TODO: IMPLEMENT
+				recipient := strings.TrimSpace(parts[1])
+				filename := strings.TrimSpace(parts[2])
+				tempFilePath := getTempFilePath()
+				encryptedMessage, FileURL, err := encryptAttachment(filename, tempFilePath)
+				if err != nil {
+					fmt.Printf("Unable to encrypt attachment: %v\n", err)
+					break
+				}
+
+				// Send the structured plaintext as a message
+				err = sendAttachmentToServer(recipient, encryptedMessage, FileURL)
+				if err != nil {
+					fmt.Println("--- ERROR: attachment send failed")
+				} else {
+					fmt.Println("--- attachment sent successfully!")
+				}
+
+				// Clean up the temporary encrypted file
+				os.Remove(tempFilePath)
 			}
 		case "QUIT":
 			running = false
@@ -856,7 +1112,7 @@ func main() {
 			fmt.Println("Commands are:\n\tsend <username> - send a message\n\tget - get new messages\n\tlist - print a list of all users\n\tquit - exit")
 
 		default:
-			fmt.Println("Unrecognized command\n")
+			fmt.Println("Unrecognized command")
 		}
 	}
 }

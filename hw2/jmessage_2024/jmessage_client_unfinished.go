@@ -21,6 +21,7 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -263,7 +264,7 @@ func downloadFileFromServer(geturl string, localPath string, key string, hash st
 // Log in to server
 func serverLogin(username string, password string) (string, error) {
 	geturl := serverProtocol + "://" + serverDomainAndPort + "/login/" +
-		username + "/" + password
+		url.QueryEscape(username) + "/" + password
 
 	code, body, err := doGetRequest(geturl)
 	if err != nil {
@@ -306,7 +307,7 @@ func getPublicKeyFromServer(forUser string) (*PubKeyStruct, error) {
 // Register username with the server
 func registerUserWithServer(username string, password string) error {
 	geturl := serverProtocol + "://" + serverDomainAndPort + "/registerUser/" +
-		username + "/" + password
+		url.QueryEscape(username) + "/" + password
 
 	code, _, err := doGetRequest(geturl)
 	if err != nil {
@@ -323,7 +324,7 @@ func registerUserWithServer(username string, password string) error {
 // Get messages from the server
 func getMessagesFromServer() ([]MessageStruct, error) {
 	geturl := serverProtocol + "://" + serverDomainAndPort + "/getMessages/" +
-		username + "/" + apiKey
+		url.QueryEscape(username) + "/" + apiKey
 
 	// Make the request to the server
 	code, body, err := doGetRequest(geturl)
@@ -378,7 +379,7 @@ func getUserListFromServer() ([]UserStruct, error) {
 // Post a message to the server
 func sendMessageToServer(sender string, recipient string, message []byte, readReceiptID int) error {
 	posturl := serverProtocol + "://" + serverDomainAndPort + "/sendMessage/" +
-		username + "/" + apiKey
+		url.QueryEscape(username) + "/" + apiKey
 
 	// Format the message as a JSON object and increment the message ID counter
 	msg := MessageStruct{sender, recipient, messageIDCounter, readReceiptID, b64.StdEncoding.EncodeToString(message), "", "", ""}
@@ -390,8 +391,8 @@ func sendMessageToServer(sender string, recipient string, message []byte, readRe
 	}
 
 	// Write the JSON string to a file
-	if username == "charlie" {
-		fmt.Printf("Message intercepted: %s\n", b64.StdEncoding.EncodeToString(message))
+	if sender == "charlie" {
+		//fmt.Printf("Message intercepted: %s\n", b64.StdEncoding.EncodeToString(message))
 		fileName := "ciphertext.txt"
 		err = os.WriteFile(fileName, body, 0644)
 		if err != nil {
@@ -496,7 +497,7 @@ func getKeyFromServer(user_key string) {
 // Upload a new public key to the server
 func registerPublicKeyWithServer(username string, pubKeyEncoded PubKeyStruct) error {
 	posturl := serverProtocol + "://" + serverDomainAndPort + "/uploadKey/" +
-		username + "/" + apiKey
+		url.QueryEscape(username) + "/" + apiKey
 
 	body, err := json.Marshal(pubKeyEncoded)
 	if err != nil {
@@ -979,28 +980,28 @@ func generatePublicKey() (PubKeyStruct, PrivKeyStruct, error) {
 // attack mode to automatically intercept user's message and send decrypted hacking message
 func attack(ciphertextFile, victim string) error {
 	// Load the target ciphertext from the file
-	cipher, err := os.ReadFile(ciphertextFile)
-	if err != nil {
-		return errors.New("failed to load ciphertext")
-	}
-
-	// Convert the ciphertext to a MessageStruct
-	var message MessageStruct
-	if err := json.Unmarshal(cipher, &message); err != nil {
-
-		return errors.New("failed to parse ciphertext")
-	}
-
-	decodedPayload, _ := b64.StdEncoding.DecodeString(message.Payload)
-
-	var ct CiphertextStruct
-	json.Unmarshal(decodedPayload, &ct)
 	decryptedMessage := ""
-	c2Bytes, _ := b64.StdEncoding.DecodeString(ct.C2)
-	fakeUsername := "charlie:"
-	for b := 8; b < len(c2Bytes); b++ {
-		fakeUsername = fakeUsername + decryptedMessage
-		for i := 0; i < 255; i++ {
+	for {
+		cipher, err := os.ReadFile(ciphertextFile)
+		if err != nil {
+			return errors.New("failed to load ciphertext")
+		}
+
+		// Convert the ciphertext to a MessageStruct
+		var message MessageStruct
+		if err := json.Unmarshal(cipher, &message); err != nil {
+
+			return errors.New("failed to parse ciphertext")
+		}
+
+		decodedPayload, _ := b64.StdEncoding.DecodeString(message.Payload)
+
+		var ct CiphertextStruct
+		json.Unmarshal(decodedPayload, &ct)
+		fakeUsername := "charlie:" + decryptedMessage
+
+		dflag := 0
+		for i := 32; i < 126; i++ {
 			tempUsername := fakeUsername + string(rune(i))
 			//fmt.Println(tempUsername)
 			_ = registerUserWithServer(tempUsername, "abc")
@@ -1038,17 +1039,15 @@ func attack(ciphertextFile, victim string) error {
 
 			err = sendMessageToServer(tempUsername, victim, modifiedPayload, 0)
 			if err != nil {
-				return errors.New("failed to send modified ciphertext")
+				continue
 			}
 
 			// Check for Alice's response
-			time.Sleep(time.Duration(100) * time.Millisecond) // Wait for a response
+			time.Sleep(time.Duration(200) * time.Millisecond) // Wait for a response
 			response, err := getMessagesFromServer()
 			if err != nil {
 				continue
 			}
-
-			dflag := 0
 			for _, j := range response {
 				if j.From == victim && j.ReceiptID != 0 {
 					// The modified ciphertext was successfully decrypted
@@ -1060,12 +1059,13 @@ func attack(ciphertextFile, victim string) error {
 			if dflag == 1 {
 				break
 			}
-
+		}
+		if dflag == 0 {
+			fmt.Println("Decrypt success")
+			return nil
 		}
 	}
-	fmt.Println(decryptedMessage)
 
-	return errors.New("no response received from victim")
 }
 
 func main() {
@@ -1109,7 +1109,10 @@ func main() {
 			fmt.Println("Ciphertext filename and victim username are required")
 			os.Exit(1)
 		}
-		attack(ciphertextFilename, victimUsername)
+		err := attack(ciphertextFilename, victimUsername)
+		if err != nil {
+			fmt.Print(err)
+		}
 		os.Exit(0)
 	}
 

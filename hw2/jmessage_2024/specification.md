@@ -107,7 +107,7 @@ response code 200 (SUCCESS) and the following JSON structure:
   "APIkey": "<APIKeyValue>"
 }
 ```
-<!-- MPNrxOWcU1yXArOam9vdaIYc -->
+<!-- JybI6TBazJ1UcevxyzpunUSe -->
 
 Here `<APIKeyValue>` is an alphanumeric API string that you will pass to the server for all subsequent operations. The server will 
 retain this value in its memory until it reboots or times out the login session, at which point you will need to execute the login command again. 
@@ -311,7 +311,7 @@ Compute `C1` and `K`:
 1. The sender decodes `encPK` as a point on the P-256 elliptic curve.
 2. The sender generates a random scalar `c` between `0` and `q-1` (inclusive).
 3. The sender computes `epk = cP` using scalar point multiplication.
-4. The sender computes `ssk = c*encPK` where * represents scalar point multiplication, and encodes the x-coordinate according to SEC 1, Version 2.0, Section 2.3.5. (NB: This is natively implemented as the ECDH() method in Go's crypto.ecdh.)
+4. The sender computes `ssk = c*encPK` where * represents scalar point multiplication, and encodes the x-coordinate according to SEC 1, Version 2.0, Section 2.3.5. (NB: This is natively implemented as the ECDH() method in Go's crypto/ecdh.)
 // Version 2.0, Section 2.3.5.
 5. The sender computes `K = SHA256(ssk)` where * represents scalar point multiplication. This key `K` will be used in the next section.
 6. The sender encodes `epk` into the value `C1`, by first encoding it using [RFC 5208, Section 4.1](https://www.rfc-editor.org/rfc/rfc5280.html#section-4.1) and then BASE64-encoding the result.
